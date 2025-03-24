@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "401445581230",
+    "project_id": "mensajeria-2bb6d",
+    "storage_bucket": "mensajeria-2bb6d.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:401445581230:android:0db62527d7e9362ee6d83f",
+        "android_client_info": {
+          "package_name": "io.dycompany.dysaeats"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "401445581230-0i0p77tq7d8r0savmpnq1jog1dg1qfs0.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "io.dycompany.dysaeats",
+            "certificate_hash": "b03da13dc21f6219616ffe253ae34e33c595823e"
+          }
+        },
+        {
+          "client_id": "401445581230-mt50emmebimjb2je1qqnk7bsnsp60nsb.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAs6Dh86fG9CSAFi5MIvQ6JtUGLvD_InQ8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "401445581230-mt50emmebimjb2je1qqnk7bsnsp60nsb.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "401445581230-r2oqv9rkt87c77h9uts8ojcupspp79v0.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "io.dycompany.dysaeats"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
