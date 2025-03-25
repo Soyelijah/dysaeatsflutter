@@ -11,9 +11,21 @@ class AuthProvider extends ChangeNotifier {
 
   // Usuario autenticado actualmente
   User? _user;
+  
+  // Estado de carga
+  bool _isLoading = true;
+  
+  // Mensaje de error
+  String? _error;
 
-  // Getter para obtener el usuario actual
+  // Getters para obtener el usuario actual
   User? get user => _user;
+  
+  // Getter para verificar si está cargando
+  bool get isLoading => _isLoading;
+  
+  // Getter para obtener mensaje de error
+  String? get error => _error;
 
   // Constructor que escucha los cambios en el estado de autenticación
   AuthProvider() {
@@ -23,16 +35,39 @@ class AuthProvider extends ChangeNotifier {
   // Método privado para manejar los cambios en el estado de autenticación
   void _onAuthStateChanged(User? firebaseUser) {
     _user = firebaseUser; // Actualiza el usuario actual
+    _isLoading = false; // Ya no está cargando
     notifyListeners(); // Notifica a los widgets que dependen de este estado
   }
 
   // Método para iniciar sesión con Google
   Future<User?> signInWithGoogle() async {
-    return await _authService.signInWithGoogle(); // Delegar al servicio de autenticación
+    _isLoading = true; // Establecer que está cargando
+    _error = null; // Limpiar errores anteriores
+    notifyListeners(); // Notificar cambios
+    
+    try {
+      return await _authService.signInWithGoogle(); // Delegar al servicio de autenticación
+    } catch (e) {
+      _error = e.toString(); // Guardar el mensaje de error
+      return null;
+    } finally {
+      _isLoading = false; // Ya no está cargando
+      notifyListeners(); // Notificar cambios
+    }
   }
 
   // Método para cerrar sesión
   Future<void> signOut() async {
-    await _authService.signOut(); // Delegar al servicio de autenticación
+    _isLoading = true; // Establecer que está cargando
+    notifyListeners(); // Notificar cambios
+    
+    try {
+      await _authService.signOut(); // Delegar al servicio de autenticación
+    } catch (e) {
+      _error = e.toString(); // Guardar el mensaje de error
+    } finally {
+      _isLoading = false; // Ya no está cargando
+      notifyListeners(); // Notificar cambios
+    }
   }
 }

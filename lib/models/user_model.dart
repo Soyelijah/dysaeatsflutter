@@ -1,36 +1,68 @@
-// Modelo de datos para representar un usuario
+import 'package:cloud_firestore/cloud_firestore.dart';
+
 class UserModel {
-  // Identificador único del usuario
   final String uid;
-
-  // Correo electrónico del usuario
   final String email;
-
-  // Nombre del usuario (opcional)
   final String? name;
-
-  // URL de la foto del usuario (opcional)
   final String? photoUrl;
+  final String? telefono;
+  final String? direccion;
+  final String role;
 
-  // Constructor para inicializar las propiedades del modelo
   UserModel({
-    required this.uid, // uid es obligatorio
-    required this.email, // email es obligatorio
-    this.name, // name es opcional
-    this.photoUrl, // photoUrl es opcional
+    required this.uid,
+    required this.email,
+    this.name,
+    this.photoUrl,
+    this.telefono,
+    this.direccion,
+    this.role = 'cliente',
   });
 
-  // Fábrica para crear una instancia de UserModel a partir de datos de Firebase
-  factory UserModel.fromFirebaseUser(Map<String, dynamic> data) {
+  // Crear una instancia de UserModel a partir de un documento de Firestore
+  factory UserModel.fromMap(String uid, Map<String, dynamic> data) {
     return UserModel(
-      uid: data['uid'], // Asigna el uid desde los datos proporcionados
-      email: data['email'], // Asigna el email desde los datos proporcionados
-      name: data['displayName'], // Asigna el nombre desde los datos proporcionados
-      photoUrl: data['photoURL'], // Asigna la URL de la foto desde los datos proporcionados
+      uid: uid,
+      email: data['email'] ?? '',
+      name: data['name'],
+      photoUrl: data['photoURL'],
+      telefono: data['telefono'],
+      direccion: data['direccion'],
+      role: data['role'] ?? 'cliente',
+    );
+  }
+
+  // Convertir el modelo a un mapa para guardarlo en Firestore
+  Map<String, dynamic> toMap() {
+    return {
+      'uid': uid,
+      'email': email,
+      'name': name,
+      'photoURL': photoUrl,
+      'telefono': telefono,
+      'direccion': direccion,
+      'role': role,
+    };
+  }
+
+  // Método para crear una copia del objeto con algunos campos modificados
+  UserModel copyWith({
+    String? uid,
+    String? email,
+    String? name,
+    String? photoUrl,
+    String? telefono,
+    String? direccion,
+    String? role,
+  }) {
+    return UserModel(
+      uid: uid ?? this.uid,
+      email: email ?? this.email,
+      name: name ?? this.name,
+      photoUrl: photoUrl ?? this.photoUrl,
+      telefono: telefono ?? this.telefono,
+      direccion: direccion ?? this.direccion,
+      role: role ?? this.role,
     );
   }
 }
-
-// Resumen: Este modelo define una estructura para representar un usuario con propiedades como uid, email, nombre y foto. 
-// También incluye un constructor de fábrica para inicializar el modelo a partir de un mapa de datos, 
-// como los que se obtienen de Firebase.
