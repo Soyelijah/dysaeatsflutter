@@ -31,7 +31,7 @@ class LocationService {
   String? get currentPedidoId => _currentPedidoId;
   
   // Solicitar y verificar permisos de ubicación
-  Future<bool> _checkLocationPermission() async {
+  Future<bool> checkLocationPermission() async {
     bool serviceEnabled;
     LocationPermission permission;
 
@@ -70,7 +70,7 @@ class LocationService {
     int intervalInSeconds = 5,
   }) async {
     // Verificar permisos
-    bool permissionGranted = await _checkLocationPermission();
+    bool permissionGranted = await checkLocationPermission();
     if (!permissionGranted) {
       return false;
     }
@@ -192,7 +192,7 @@ class LocationService {
   // Obtener la última ubicación conocida
   Future<Position?> getLastKnownLocation() async {
     try {
-      bool permissionGranted = await _checkLocationPermission();
+      bool permissionGranted = await checkLocationPermission();
       if (!permissionGranted) return null;
       
       return await Geolocator.getLastKnownPosition();
@@ -205,7 +205,7 @@ class LocationService {
   // Obtener la ubicación actual
   Future<Position?> getCurrentLocation() async {
     try {
-      bool permissionGranted = await _checkLocationPermission();
+      bool permissionGranted = await checkLocationPermission();
       if (!permissionGranted) return null;
       
       return await Geolocator.getCurrentPosition(

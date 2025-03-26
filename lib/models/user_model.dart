@@ -8,6 +8,7 @@ class UserModel {
   final String? telefono;
   final String? direccion;
   final String role;
+  final DateTime? createdAt;
 
   UserModel({
     required this.uid,
@@ -17,6 +18,7 @@ class UserModel {
     this.telefono,
     this.direccion,
     this.role = 'cliente',
+    this.createdAt,
   });
 
   // Crear una instancia de UserModel a partir de un documento de Firestore
@@ -29,6 +31,9 @@ class UserModel {
       telefono: data['telefono'],
       direccion: data['direccion'],
       role: data['role'] ?? 'cliente',
+      createdAt: data['createdAt'] != null
+          ? (data['createdAt'] as Timestamp).toDate()
+          : null,
     );
   }
 
@@ -42,6 +47,7 @@ class UserModel {
       'telefono': telefono,
       'direccion': direccion,
       'role': role,
+      'createdAt': createdAt != null ? Timestamp.fromDate(createdAt!) : null,
     };
   }
 
@@ -54,6 +60,7 @@ class UserModel {
     String? telefono,
     String? direccion,
     String? role,
+    DateTime? createdAt,
   }) {
     return UserModel(
       uid: uid ?? this.uid,
@@ -63,6 +70,7 @@ class UserModel {
       telefono: telefono ?? this.telefono,
       direccion: direccion ?? this.direccion,
       role: role ?? this.role,
+      createdAt: createdAt ?? this.createdAt,
     );
   }
 }

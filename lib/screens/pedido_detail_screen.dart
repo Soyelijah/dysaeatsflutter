@@ -82,7 +82,7 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
     if (currentUser == null) return;
     
     // Verificar si estamos autorizados para rastrear ubicación
-    bool locationPermission = await _locationService._checkLocationPermission();
+    bool locationPermission = await _locationService.checkLocationPermission();
     setState(() {
       _isLocationEnabled = locationPermission;
     });
@@ -916,7 +916,11 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
           padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           child: CustomButton(
             text: 'Aceptar Pedido',
-            onPressed: _isActionLoading ? null : _aceptarPedido,
+            onPressed: () {
+              if (!_isActionLoading) {
+                _aceptarPedido();
+              }
+            },
             color: Colors.green,
             icono: Icons.check,
             isLoading: _isActionLoading,
@@ -927,7 +931,11 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
           padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           child: CustomButton(
             text: 'Marcar como Entregado',
-            onPressed: _isActionLoading ? null : _marcarComoEntregado,
+            onPressed: () {
+              if (!_isActionLoading) {
+                _marcarComoEntregado();
+              }
+            },
             color: AppTheme.primaryColor,
             icono: Icons.check_circle,
             isLoading: _isActionLoading,
@@ -941,7 +949,11 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
           padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           child: CustomButton(
             text: 'Cancelar Pedido',
-            onPressed: _isActionLoading ? null : _cancelarPedido,
+            onPressed: () {
+              if (!_isActionLoading) {
+                _cancelarPedido();
+              }
+            },
             color: Colors.red,
             icono: Icons.cancel,
             isLoading: _isActionLoading,
@@ -955,7 +967,11 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
           padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           child: CustomButton(
             text: 'Cancelar Pedido',
-            onPressed: _isActionLoading ? null : _cancelarPedido,
+            onPressed: () {
+              if (!_isActionLoading) {
+                _cancelarPedido();
+              }
+            },
             color: Colors.red,
             icono: Icons.cancel,
             isLoading: _isActionLoading,

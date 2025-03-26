@@ -1,5 +1,3 @@
-// lib/models/pedido_model.dart (Flutter)
-
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 // Clase que representa un pedido en el sistema
@@ -53,12 +51,10 @@ class PedidoModel {
     
     UbicacionModel? ubicacionRepartidor;
     if (data['ubicacionRepartidor'] != null) {
-      final geoPoint = data['ubicacionRepartidor'] as GeoPoint;
-      ubicacionRepartidor = UbicacionModel(
-        latitude: geoPoint.latitude,
-        longitude: geoPoint.longitude,
-        direccion: null,
-      );
+      final ubicacionData = data['ubicacionRepartidor'];
+      
+      // Manejo flexible de diferentes tipos de datos de ubicación
+      ubicacionRepartidor = UbicacionModel.fromMap(ubicacionData);
     }
 
     return PedidoModel(
@@ -95,6 +91,7 @@ class PedidoModel {
     if (total != null) map['total'] = total;
     if (metodoPago != null) map['metodoPago'] = metodoPago;
     if (ubicacionCliente != null) map['ubicacionCliente'] = ubicacionCliente!.toMap();
+    if (ubicacionRepartidor != null) map['ubicacionRepartidor'] = ubicacionRepartidor!.toMap();
     
     return map;
   }
@@ -180,7 +177,8 @@ class UbicacionModel {
     this.direccion,
   });
   
-  factory UbicacionModel.fromMap(Map<String, dynamic> data) {
+  // Método de fábrica más robusto y flexible
+  factory UbicacionModel.fromMap(dynamic data) {
     // Si viene como GeoPoint
     if (data is GeoPoint) {
       return UbicacionModel(
@@ -191,10 +189,19 @@ class UbicacionModel {
     }
     
     // Si viene como Map
+    if (data is Map<String, dynamic>) {
+      return UbicacionModel(
+        latitude: data['latitude'] ?? 0.0,
+        longitude: data['longitude'] ?? 0.0,
+        direccion: data['direccion'],
+      );
+    }
+    
+    // Valor predeterminado si no es ninguno de los tipos esperados
     return UbicacionModel(
-      latitude: data['latitude'] ?? 0.0,
-      longitude: data['longitude'] ?? 0.0,
-      direccion: data['direccion'],
+      latitude: 0.0,
+      longitude: 0.0,
+      direccion: null,
     );
   }
   

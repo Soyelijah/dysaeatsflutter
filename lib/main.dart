@@ -32,7 +32,7 @@ Future<void> main() async {
   ]);
   
   // Inicializar Firebase usando el servicio centralizado
-  await FirebaseService().initialize();
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
   
   // Iniciar la aplicación
   runApp(MyApp());
