@@ -1,25 +1,20 @@
+// lib/screens/pedido_detail_screen.dart (Flutter)
+
+import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:intl/intl.dart';
 import '../models/pedido_model.dart';
 import '../models/user_model.dart';
 import '../services/db_service.dart';
-import '../routes/app_router.dart';
-import '../widgets/loading_indicator.dart';
-import '../widgets/custom_button.dart';
+import '../services/location_service.dart';
 import '../theme/app_theme.dart';
+import '../widgets/custom_button.dart';
+import '../widgets/loading_indicator.dart';
+import '../widgets/status_badge.dart';
 
-/**
- * Pantalla de Detalle de Pedido
- * 
- * Muestra información detallada de un pedido específico:
- * - Estado y tiempos
- * - Descripción del pedido
- * - Información de cliente/repartidor
- * - Opciones para actualizar el estado según el rol
- * - Línea de tiempo con el progreso del pedido
- */
 class PedidoDetailScreen extends StatefulWidget {
   final String pedidoId;
   
@@ -34,156 +29,269 @@ class PedidoDetailScreen extends StatefulWidget {
 
 class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
   // Variables de estado
-  late Future<PedidoModel?> _pedidoFuture;
+  late Stream<DocumentSnapshot> _pedidoStream;
+  PedidoModel? _pedido;
   UserModel? _cliente;
   UserModel? _repartidor;
   UserModel? _currentUser;
-  bool _isLoading = false;
+  bool _isLoading = true;
+  bool _isMapReady = false;
+  bool _isLocationEnabled = false;
+  bool _isActionLoading = false;
   String? _errorMessage;
+  
+  // Referencias para mapas
+  GoogleMapController? _mapController;
+  final Set<Marker> _markers = {};
+  final Set<Polyline> _polylines = {};
+  final LocationService _locationService = LocationService();
+  StreamSubscription? _locationSubscription;
+  
+  // Ubicaciones
+  LatLng? _repartidorPosition;
+  LatLng? _clientePosition;
   
   @override
   void initState() {
     super.initState();
     
-    // Iniciar carga de datos
-    _pedidoFuture = _cargarPedido();
-    _cargarUsuarioActual();
+    // Configurar stream para actualizaciones en tiempo real del pedido
+    _pedidoStream = FirebaseFirestore.instance
+        .collection('pedidos')
+        .doc(widget.pedidoId)
+        .snapshots();
+    
+    // Cargar datos iniciales
+    _cargarDatos();
+    
+    // Inicializar servicio de ubicación
+    _inicializarUbicacion();
   }
   
-  // Cargar datos del pedido desde Firestore
-  Future<PedidoModel?> _cargarPedido() async {
+  @override
+  void dispose() {
+    // Limpiar controlador de mapa y suscripción de ubicación
+    _mapController?.dispose();
+    _locationSubscription?.cancel();
+    super.dispose();
+  }
+  
+  // Inicializar servicio de ubicación
+  Future<void> _inicializarUbicacion() async {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) return;
+    
+    // Verificar si estamos autorizados para rastrear ubicación
+    bool locationPermission = await _locationService._checkLocationPermission();
+    setState(() {
+      _isLocationEnabled = locationPermission;
+    });
+    
+    // Si somos repartidor y tenemos permisos, comenzar rastreo
+    if (_isRepartidorAsignado() && locationPermission) {
+      await _locationService.startTracking(pedidoId: widget.pedidoId);
+      
+      // Suscribirse a actualizaciones de ubicación
+      _locationSubscription = _locationService.locationStream.listen((position) {
+        if (mounted) {
+          setState(() {
+            _repartidorPosition = LatLng(position.latitude, position.longitude);
+            _actualizarMapa();
+          });
+        }
+      });
+    }
+  }
+  
+  // Verificar si el usuario actual es el repartidor asignado
+  bool _isRepartidorAsignado() {
+    if (_pedido == null || _currentUser == null) return false;
+    return _pedido!.repartidorId == _currentUser!.uid;
+  }
+  
+  // Verificar si el usuario actual es el cliente del pedido
+  bool _isCliente() {
+    if (_pedido == null || _currentUser == null) return false;
+    return _pedido!.userId == _currentUser!.uid;
+  }
+  
+  // Cargar datos iniciales
+  Future<void> _cargarDatos() async {
     try {
-      // Referencia al documento del pedido
-      final pedidoRef = FirebaseFirestore.instance
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+      });
+      
+      // Obtener datos del usuario actual
+      final currentUser = FirebaseAuth.instance.currentUser;
+      if (currentUser != null) {
+        _currentUser = await DBService().getUsuario(currentUser.uid);
+      }
+      
+      // Obtener datos iniciales del pedido
+      final pedidoDoc = await FirebaseFirestore.instance
           .collection('pedidos')
-          .doc(widget.pedidoId);
-          
-      // Obtener documento
-      final pedidoDoc = await pedidoRef.get();
+          .doc(widget.pedidoId)
+          .get();
       
       if (!pedidoDoc.exists) {
         setState(() {
-          _errorMessage = 'El pedido no existe o ha sido eliminado';
+          _errorMessage = "El pedido no existe o ha sido eliminado";
+          _isLoading = false;
         });
-        return null;
+        return;
       }
       
-      // Convertir documento a modelo
+      // Convertir a modelo
       final pedidoData = pedidoDoc.data()!;
-      final pedido = PedidoModel.fromMap(pedidoDoc.id, pedidoData);
+      _pedido = PedidoModel.fromMap(pedidoDoc.id, pedidoData);
       
       // Cargar datos del cliente
-      await _cargarCliente(pedido.userId);
+      _cliente = await DBService().getUsuario(_pedido!.userId);
       
-      // Si hay repartidor asignado, cargar sus datos
-      if (pedido.repartidorId != null && pedido.repartidorId!.isNotEmpty) {
-        await _cargarRepartidor(pedido.repartidorId!);
+      // Cargar datos del repartidor si existe
+      if (_pedido!.repartidorId != null) {
+        _repartidor = await DBService().getUsuario(_pedido!.repartidorId!);
       }
       
-      return pedido;
-    } catch (e) {
+      // Obtener ubicaciones para el mapa
+      await _obtenerUbicaciones();
+      
       setState(() {
-        _errorMessage = 'Error al cargar el pedido: $e';
+        _isLoading = false;
       });
-      return null;
-    }
-  }
-  
-  // Cargar datos del cliente
-  Future<void> _cargarCliente(String userId) async {
-    try {
-      final clienteRef = FirebaseFirestore.instance
-          .collection('users')
-          .doc(userId);
-          
-      final clienteDoc = await clienteRef.get();
       
-      if (clienteDoc.exists) {
-        final clienteData = clienteDoc.data()!;
-        setState(() {
-          _cliente = UserModel(
-            uid: clienteDoc.id,
-            email: clienteData['email'] ?? '',
-            name: clienteData['name'],
-            photoUrl: clienteData['photoURL'],
-          );
-        });
-      }
     } catch (e) {
-      print('Error al cargar datos del cliente: $e');
+      print("Error al cargar datos: $e");
+      setState(() {
+        _errorMessage = "Error al cargar los datos del pedido";
+        _isLoading = false;
+      });
     }
   }
   
-  // Cargar datos del repartidor
-  Future<void> _cargarRepartidor(String repartidorId) async {
+  // Obtener ubicaciones para el mapa
+  Future<void> _obtenerUbicaciones() async {
     try {
-      final repartidorRef = FirebaseFirestore.instance
-          .collection('users')
-          .doc(repartidorId);
-          
-      final repartidorDoc = await repartidorRef.get();
-      
-      if (repartidorDoc.exists) {
-        final repartidorData = repartidorDoc.data()!;
-        setState(() {
-          _repartidor = UserModel(
-            uid: repartidorDoc.id,
-            email: repartidorData['email'] ?? '',
-            name: repartidorData['name'],
-            photoUrl: repartidorData['photoURL'],
-          );
-        });
+      // Obtener ubicación del cliente
+      if (_cliente?.direccion != null) {
+        // Aquí deberías geocodificar la dirección
+        // Por ahora usamos una posición fija de ejemplo
+        _clientePosition = LatLng(-33.4489, -70.6693); // Santiago, Chile
       }
-    } catch (e) {
-      print('Error al cargar datos del repartidor: $e');
-    }
-  }
-  
-  // Cargar datos del usuario actual
-  Future<void> _cargarUsuarioActual() async {
-    try {
-      final user = FirebaseAuth.instance.currentUser;
       
-      if (user != null) {
-        final userRef = FirebaseFirestore.instance
-            .collection('users')
-            .doc(user.uid);
-            
-        final userDoc = await userRef.get();
+      // Obtener ubicación del repartidor si existe
+      if (_pedido?.repartidorId != null) {
+        final ubicacionDoc = await FirebaseFirestore.instance
+            .collection('repartidores_ubicacion')
+            .doc(_pedido!.repartidorId)
+            .get();
         
-        if (userDoc.exists) {
-          final userData = userDoc.data()!;
-          setState(() {
-            _currentUser = UserModel(
-              uid: user.uid,
-              email: user.email ?? '',
-              name: userData['name'],
-              photoUrl: userData['photoURL'],
-            );
-          });
+        if (ubicacionDoc.exists && ubicacionDoc.data()!['ubicacion'] != null) {
+          final geoPoint = ubicacionDoc.data()!['ubicacion'] as GeoPoint;
+          _repartidorPosition = LatLng(geoPoint.latitude, geoPoint.longitude);
         }
       }
     } catch (e) {
-      print('Error al cargar datos del usuario actual: $e');
+      print("Error al obtener ubicaciones: $e");
+    }
+  }
+  
+  // Configurar el mapa
+  void _onMapCreated(GoogleMapController controller) {
+    _mapController = controller;
+    setState(() {
+      _isMapReady = true;
+      _actualizarMapa();
+    });
+  }
+  
+  // Actualizar marcadores y rutas en el mapa
+  void _actualizarMapa() {
+    if (!_isMapReady) return;
+    
+    _markers.clear();
+    _polylines.clear();
+    
+    // Agregar marcador del cliente si existe
+    if (_clientePosition != null) {
+      _markers.add(
+        Marker(
+          markerId: MarkerId('cliente'),
+          position: _clientePosition!,
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+          infoWindow: InfoWindow(title: 'Dirección de entrega'),
+        ),
+      );
+    }
+    
+    // Agregar marcador del repartidor si existe
+    if (_repartidorPosition != null) {
+      _markers.add(
+        Marker(
+          markerId: MarkerId('repartidor'),
+          position: _repartidorPosition!,
+          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
+          infoWindow: InfoWindow(title: 'Repartidor'),
+        ),
+      );
+    }
+    
+    // Crear ruta entre repartidor y cliente si ambos existen
+    if (_repartidorPosition != null && _clientePosition != null) {
+      _polylines.add(
+        Polyline(
+          polylineId: PolylineId('ruta'),
+          points: [_repartidorPosition!, _clientePosition!],
+          color: Colors.blue,
+          width: 5,
+        ),
+      );
+      
+      // Ajustar zoom para ver ambos puntos
+      LatLngBounds bounds = LatLngBounds(
+        southwest: LatLng(
+          _repartidorPosition!.latitude < _clientePosition!.latitude ? 
+            _repartidorPosition!.latitude : _clientePosition!.latitude,
+          _repartidorPosition!.longitude < _clientePosition!.longitude ? 
+            _repartidorPosition!.longitude : _clientePosition!.longitude,
+        ),
+        northeast: LatLng(
+          _repartidorPosition!.latitude > _clientePosition!.latitude ? 
+            _repartidorPosition!.latitude : _clientePosition!.latitude,
+          _repartidorPosition!.longitude > _clientePosition!.longitude ? 
+            _repartidorPosition!.longitude : _clientePosition!.longitude,
+        ),
+      );
+      
+      _mapController?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 50));
+    }
+    // Si solo tenemos la posición del repartidor
+    else if (_repartidorPosition != null) {
+      _mapController?.animateCamera(CameraUpdate.newLatLngZoom(_repartidorPosition!, 15));
+    }
+    // Si solo tenemos la posición del cliente
+    else if (_clientePosition != null) {
+      _mapController?.animateCamera(CameraUpdate.newLatLngZoom(_clientePosition!, 15));
     }
   }
   
   // Aceptar pedido (para repartidores)
-  Future<void> _aceptarPedido(PedidoModel pedido) async {
-    if (_currentUser == null) return;
+  Future<void> _aceptarPedido() async {
+    if (_pedido == null || _currentUser == null) return;
     
     setState(() {
-      _isLoading = true;
+      _isActionLoading = true;
     });
     
     try {
-      await DBService().aceptarPedido(pedido.id, _currentUser!.uid);
+      await DBService().aceptarPedido(_pedido!.id, _currentUser!.uid);
       
-      // Recargar datos del pedido
-      setState(() {
-        _pedidoFuture = _cargarPedido();
-        _isLoading = false;
-      });
+      // Iniciar rastreo de ubicación
+      if (_isLocationEnabled) {
+        await _locationService.startTracking(pedidoId: _pedido!.id);
+      }
       
       // Mostrar mensaje de éxito
       ScaffoldMessenger.of(context).showSnackBar(
@@ -193,35 +301,33 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
         ),
       );
     } catch (e) {
-      setState(() {
-        _isLoading = false;
-        _errorMessage = 'Error al aceptar el pedido: $e';
-      });
-      
-      // Mostrar mensaje de error
+      print("Error al aceptar pedido: $e");
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(_errorMessage!),
+          content: Text('Error al aceptar el pedido'),
           backgroundColor: Colors.red,
         ),
       );
+    } finally {
+      setState(() {
+        _isActionLoading = false;
+      });
     }
   }
   
   // Marcar pedido como entregado
-  Future<void> _marcarComoEntregado(String pedidoId) async {
+  Future<void> _marcarComoEntregado() async {
+    if (_pedido == null) return;
+    
     setState(() {
-      _isLoading = true;
+      _isActionLoading = true;
     });
     
     try {
-      await DBService().marcarComoEntregado(pedidoId);
+      await DBService().marcarComoEntregado(_pedido!.id);
       
-      // Recargar datos del pedido
-      setState(() {
-        _pedidoFuture = _cargarPedido();
-        _isLoading = false;
-      });
+      // Detener rastreo de ubicación
+      await _locationService.stopTracking();
       
       // Mostrar mensaje de éxito
       ScaffoldMessenger.of(context).showSnackBar(
@@ -231,28 +337,29 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
         ),
       );
     } catch (e) {
-      setState(() {
-        _isLoading = false;
-        _errorMessage = 'Error al actualizar el pedido: $e';
-      });
-      
-      // Mostrar mensaje de error
+      print("Error al marcar pedido como entregado: $e");
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(_errorMessage!),
+          content: Text('Error al marcar el pedido como entregado'),
           backgroundColor: Colors.red,
         ),
       );
+    } finally {
+      setState(() {
+        _isActionLoading = false;
+      });
     }
   }
   
-  // Cancelar pedido (para clientes o administradores)
-  Future<void> _cancelarPedido(String pedidoId) async {
+  // Cancelar pedido
+  Future<void> _cancelarPedido() async {
+    if (_pedido == null) return;
+    
     // Mostrar diálogo de confirmación
-    final confirmar = await showDialog<bool>(
+    bool confirmar = await showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Cancelar pedido'),
+        title: Text('Cancelar Pedido'),
         content: Text('¿Estás seguro de que deseas cancelar este pedido?'),
         actions: [
           TextButton(
@@ -268,29 +375,16 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
           ),
         ],
       ),
-    );
+    ) ?? false;
     
-    if (confirmar != true) return;
+    if (!confirmar) return;
     
     setState(() {
-      _isLoading = true;
+      _isActionLoading = true;
     });
     
     try {
-      // Actualizar el estado en Firestore
-      final pedidoRef = FirebaseFirestore.instance
-          .collection('pedidos')
-          .doc(pedidoId);
-          
-      await pedidoRef.update({
-        'estado': 'cancelado'
-      });
-      
-      // Recargar datos del pedido
-      setState(() {
-        _pedidoFuture = _cargarPedido();
-        _isLoading = false;
-      });
+      await DBService().cancelarPedido(_pedido!.id);
       
       // Mostrar mensaje de éxito
       ScaffoldMessenger.of(context).showSnackBar(
@@ -300,84 +394,18 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
         ),
       );
     } catch (e) {
+      print("Error al cancelar pedido: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error al cancelar el pedido'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
       setState(() {
-        _isLoading = false;
-        _errorMessage = 'Error al cancelar el pedido: $e';
+        _isActionLoading = false;
       });
-      
-      // Mostrar mensaje de error
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(_errorMessage!),
-          backgroundColor: Colors.red,
-        ),
-      );
     }
-  }
-  
-  // Formatear fecha para mostrar
-  String _formatearFecha(DateTime fecha) {
-    return DateFormat('dd/MM/yyyy HH:mm').format(fecha);
-  }
-  
-  // Obtener color y etiqueta según el estado del pedido
-  Map<String, dynamic> _getEstadoInfo(String estado) {
-    switch (estado) {
-      case 'pendiente':
-        return {
-          'color': Colors.amber,
-          'texto': 'Pendiente',
-          'icono': Icons.hourglass_empty,
-        };
-      case 'en camino':
-        return {
-          'color': Colors.blue,
-          'texto': 'En camino',
-          'icono': Icons.directions_bike,
-        };
-      case 'entregado':
-        return {
-          'color': Colors.green,
-          'texto': 'Entregado',
-          'icono': Icons.check_circle,
-        };
-      case 'cancelado':
-        return {
-          'color': Colors.red,
-          'texto': 'Cancelado',
-          'icono': Icons.cancel,
-        };
-      default:
-        return {
-          'color': Colors.grey,
-          'texto': estado,
-          'icono': Icons.help_outline,
-        };
-    }
-  }
-  
-  // Navegar a la pantalla de mapa
-  void _navegarAMapa(PedidoModel pedido) {
-    // Verificar que tengamos dirección de entrega
-    if (_cliente == null || _cliente!.direccion == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('No se encontró la dirección de entrega'),
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
-    
-    // Navegar a la pantalla de mapa
-    Navigator.pushNamed(
-      context,
-      AppRouter.map,
-      arguments: {
-        'pedidoId': pedido.id,
-        'direccionDestino': _cliente!.direccion,
-      },
-    );
   }
   
   @override
@@ -388,441 +416,569 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
         backgroundColor: AppTheme.primaryColor,
         elevation: 0,
       ),
-      body: FutureBuilder<PedidoModel?>(
-        future: _pedidoFuture,
-        builder: (context, snapshot) {
-          // Mostrar indicador de carga mientras se cargan los datos
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return Center(
-              child: LoadingIndicator(),
-            );
-          }
-          
-          // Mostrar mensaje de error si ocurrió algún problema
-          if (snapshot.hasError || _errorMessage != null) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.error_outline,
-                    color: Colors.red,
-                    size: 60,
-                  ),
-                  SizedBox(height: 16),
-                  Text(
-                    _errorMessage ?? 'Error al cargar el pedido',
-                    style: TextStyle(
-                      color: Colors.red,
-                      fontSize: 16,
-                    ),
-                    textAlign: TextAlign.center,
-                  ),
-                  SizedBox(height: 24),
-                  CustomButton(
-                    text: 'Volver',
-                    onPressed: () => Navigator.pop(context),
-                    color: AppTheme.primaryColor,
-                  ),
-                ],
-              ),
-            );
-          }
-          
-          // Mostrar mensaje si no se encontró el pedido
-          if (!snapshot.hasData) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.search_off,
-                    color: Colors.grey,
-                    size: 60,
-                  ),
-                  SizedBox(height: 16),
-                  Text(
-                    'No se encontró el pedido',
-                    style: TextStyle(
-                      color: Colors.grey,
-                      fontSize: 16,
-                    ),
-                  ),
-                  SizedBox(height: 24),
-                  CustomButton(
-                    text: 'Volver',
-                    onPressed: () => Navigator.pop(context),
-                    color: AppTheme.primaryColor,
-                  ),
-                ],
-              ),
-            );
-          }
-          
-          // Si tenemos datos, mostrar el detalle del pedido
-          final pedido = snapshot.data!;
-          final estadoInfo = _getEstadoInfo(pedido.estado);
-          
-          return Stack(
-            children: [
-              // Contenido principal
-              SingleChildScrollView(
-                padding: EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    // Tarjeta de información general
-                    Card(
-                      elevation: 2,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Padding(
-                        padding: EdgeInsets.all(16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            // Estado del pedido
-                            Row(
-                              children: [
-                                Icon(
-                                  estadoInfo['icono'],
-                                  color: estadoInfo['color'],
-                                ),
-                                SizedBox(width: 8),
-                                Text(
-                                  'Estado: ',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 16,
-                                  ),
-                                ),
-                                Container(
-                                  padding: EdgeInsets.symmetric(
-                                    horizontal: 8,
-                                    vertical: 4,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: estadoInfo['color'].withOpacity(0.2),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: Text(
-                                    estadoInfo['texto'],
-                                    style: TextStyle(
-                                      color: estadoInfo['color'],
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                            SizedBox(height: 12),
-                            
-                            // Fecha de creación
-                            Row(
-                              children: [
-                                Icon(
-                                  Icons.calendar_today,
-                                  color: Colors.grey,
-                                  size: 16,
-                                ),
-                                SizedBox(width: 8),
-                                Text(
-                                  'Fecha: ${_formatearFecha(pedido.creadoEn)}',
-                                  style: TextStyle(
-                                    color: Colors.grey[700],
-                                  ),
-                                ),
-                              ],
-                            ),
-                            SizedBox(height: 16),
-                            
-                            // Descripción del pedido
-                            Text(
-                              'Descripción',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 16,
-                              ),
-                            ),
-                            SizedBox(height: 8),
-                            Container(
-                              padding: EdgeInsets.all(12),
-                              decoration: BoxDecoration(
-                                color: Colors.grey[100],
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: Text(
-                                pedido.descripcion,
-                                style: TextStyle(
-                                  fontSize: 15,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    SizedBox(height: 16),
-                    
-                    // Información del cliente
-                    Card(
-                      elevation: 2,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Padding(
-                        padding: EdgeInsets.all(16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Información del Cliente',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 16,
-                              ),
-                            ),
-                            SizedBox(height: 12),
-                            
-                            // Detalles del cliente
-                            if (_cliente != null) ...[
-                              _buildInfoRow(
-                                icono: Icons.person,
-                                titulo: 'Nombre',
-                                valor: _cliente!.name ?? 'No especificado',
-                              ),
-                              SizedBox(height: 8),
-                              _buildInfoRow(
-                                icono: Icons.email,
-                                titulo: 'Email',
-                                valor: _cliente!.email,
-                              ),
-                              if (_cliente!.telefono != null) ...[
-                                SizedBox(height: 8),
-                                _buildInfoRow(
-                                  icono: Icons.phone,
-                                  titulo: 'Teléfono',
-                                  valor: _cliente!.telefono!,
-                                ),
-                              ],
-                              if (_cliente!.direccion != null) ...[
-                                SizedBox(height: 8),
-                                _buildInfoRow(
-                                  icono: Icons.location_on,
-                                  titulo: 'Dirección',
-                                  valor: _cliente!.direccion!,
-                                ),
-                              ],
-                            ] else
-                              Text(
-                                'No se encontró información del cliente',
-                                style: TextStyle(
-                                  color: Colors.grey,
-                                  fontStyle: FontStyle.italic,
-                                ),
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    SizedBox(height: 16),
-                    
-                    // Información del repartidor (si existe)
-                    if (pedido.repartidorId != null && pedido.repartidorId!.isNotEmpty) ...[
-                      Card(
-                        elevation: 2,
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: Padding(
-                          padding: EdgeInsets.all(16),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Información del Repartidor',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                ),
-                              ),
-                              SizedBox(height: 12),
-                              
-                              // Detalles del repartidor
-                              if (_repartidor != null) ...[
-                                Row(
-                                  children: [
-                                    if (_repartidor!.photoUrl != null)
-                                      CircleAvatar(
-                                        backgroundImage: NetworkImage(_repartidor!.photoUrl!),
-                                        radius: 20,
-                                      )
-                                    else
-                                      CircleAvatar(
-                                        child: Icon(Icons.person),
-                                        radius: 20,
-                                      ),
-                                    SizedBox(width: 12),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            _repartidor!.name ?? 'Repartidor',
-                                            style: TextStyle(
-                                              fontWeight: FontWeight.bold,
-                                            ),
-                                          ),
-                                          if (_repartidor!.telefono != null)
-                                            Text(
-                                              _repartidor!.telefono!,
-                                              style: TextStyle(
-                                                color: Colors.grey[700],
-                                              ),
-                                            ),
-                                        ],
-                                      ),
-                                    ),
-                                    
-                                    // Botón para llamar si tenemos el teléfono
-                                    if (_repartidor!.telefono != null)
-                                      IconButton(
-                                        icon: Icon(
-                                          Icons.phone,
-                                          color: AppTheme.primaryColor,
-                                        ),
-                                        onPressed: () {
-                                          // Lanzar acción para llamar
-                                          // Uri.parse('tel:${_repartidor!.telefono}')
-                                        },
-                                      ),
-                                  ],
-                                ),
-                              ] else
-                                Text(
-                                  'No se encontró información del repartidor',
-                                  style: TextStyle(
-                                    color: Colors.grey,
-                                    fontStyle: FontStyle.italic,
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      SizedBox(height: 16),
-                    ],
-                    
-                    // Línea de tiempo del pedido
-                    Card(
-                      elevation: 2,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Padding(
-                        padding: EdgeInsets.all(16),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Seguimiento del Pedido',
-                              style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 16,
-                              ),
-                            ),
-                            SizedBox(height: 16),
-                            
-                            // Estado: Creado
-                            _buildTimelineItem(
-                              titulo: 'Pedido creado',
-                              fecha: _formatearFecha(pedido.creadoEn),
-                              icono: Icons.receipt,
-                              color: Colors.green,
-                              isCompleted: true,
-                              isLast: false,
-                            ),
-                            
-                            // Estado: En camino
-                            _buildTimelineItem(
-                              titulo: 'Pedido aceptado',
-                              fecha: pedido.estado == 'pendiente'
-                                  ? 'Esperando repartidor'
-                                  : 'Repartidor asignado',
-                              icono: Icons.directions_bike,
-                              color: Colors.blue,
-                              isCompleted: pedido.estado == 'en camino' || pedido.estado == 'entregado',
-                              isLast: false,
-                            ),
-                            
-                            // Estado: Entregado o Cancelado
-                            if (pedido.estado == 'cancelado')
-                              _buildTimelineItem(
-                                titulo: 'Pedido cancelado',
-                                fecha: 'El pedido ha sido cancelado',
-                                icono: Icons.cancel,
-                                color: Colors.red,
-                                isCompleted: true,
-                                isLast: true,
-                              )
-                            else
-                              _buildTimelineItem(
-                                titulo: 'Pedido entregado',
-                                fecha: pedido.estado == 'entregado'
-                                    ? 'Entrega completada'
-                                    : 'Pendiente',
-                                icono: Icons.check_circle,
-                                color: Colors.green,
-                                isCompleted: pedido.estado == 'entregado',
-                                isLast: true,
-                              ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    
-                    // Espacio adicional para el botón flotante
-                    SizedBox(height: 80),
-                  ],
-                ),
-              ),
-              
-              // Botones de acción según el rol y estado del pedido
-              if (_currentUser != null && !_isLoading)
-                Positioned(
-                  bottom: 16,
-                  left: 16,
-                  right: 16,
-                  child: _buildActionButtons(pedido),
-                ),
-                
-              // Indicador de carga
-              if (_isLoading)
-                Container(
-                  color: Colors.black.withOpacity(0.3),
-                  child: Center(
-                    child: CircularProgressIndicator(),
-                  ),
-                ),
-            ],
-          );
-        },
+      body: _isLoading ? _buildLoadingView() : _buildBody(),
+    );
+  }
+  
+  // Vista de carga
+  Widget _buildLoadingView() {
+    return Center(
+      child: LoadingIndicator(),
+    );
+  }
+  
+  // Cuerpo principal
+  Widget _buildBody() {
+    if (_errorMessage != null) {
+      return _buildErrorView();
+    }
+    
+    return StreamBuilder<DocumentSnapshot>(
+      stream: _pedidoStream,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return _buildErrorView(message: "Error al obtener datos en tiempo real");
+        }
+        
+        if (snapshot.connectionState == ConnectionState.waiting && _pedido == null) {
+          return _buildLoadingView();
+        }
+        
+        // Actualizar modelo de pedido si hay cambios
+        if (snapshot.hasData && snapshot.data!.exists) {
+          final newData = snapshot.data!.data() as Map<String, dynamic>;
+          _pedido = PedidoModel.fromMap(snapshot.data!.id, newData);
+        }
+        
+        return _buildPedidoContent();
+      },
+    );
+  }
+  
+  // Vista de error
+  Widget _buildErrorView({String? message}) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.error_outline,
+            color: Colors.red,
+            size: 60,
+          ),
+          SizedBox(height: 16),
+          Text(
+            message ?? _errorMessage ?? 'Error al cargar el pedido',
+            style: TextStyle(
+              color: Colors.red,
+              fontSize: 16,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          SizedBox(height: 24),
+          CustomButton(
+            text: 'Volver',
+            onPressed: () => Navigator.pop(context),
+            color: AppTheme.primaryColor,
+          ),
+        ],
       ),
     );
   }
   
-  // Widget para mostrar filas de información
+  // Contenido del pedido
+  Widget _buildPedidoContent() {
+    if (_pedido == null) {
+      return _buildErrorView(message: "No se encontró el pedido");
+    }
+    
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Cabecera con estado del pedido
+          _buildHeaderCard(),
+          
+          // Mapa de seguimiento
+          if (_pedido!.estado == "en camino")
+            _buildMapCard(),
+            
+          // Información del cliente
+          _buildClienteCard(),
+          
+          // Información del repartidor
+          if (_pedido!.repartidorId != null)
+            _buildRepartidorCard(),
+            
+          // Timeline de seguimiento
+          _buildTimelineCard(),
+          
+          // Botones de acción
+          _buildActionButtons(),
+          
+          // Espaciado final
+          SizedBox(height: 20),
+        ],
+      ),
+    );
+  }
+  
+  // Tarjeta de cabecera
+  Widget _buildHeaderCard() {
+    return Card(
+      margin: EdgeInsets.all(16),
+      elevation: 2,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Estado y fecha
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                StatusBadge(estado: _pedido!.estado),
+                Text(
+                  DateFormat('dd/MM/yyyy HH:mm').format(_pedido!.creadoEn),
+                  style: TextStyle(
+                    color: Colors.grey[600],
+                    fontSize: 14,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 16),
+            
+            // ID del pedido
+            Text(
+              'Pedido #${_pedido!.id.substring(0, 8)}',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+              ),
+            ),
+            SizedBox(height: 8),
+            
+            // Descripción
+            Text(
+              'Descripción:',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 15,
+              ),
+            ),
+            SizedBox(height: 4),
+            Text(
+              _pedido!.descripcion,
+              style: TextStyle(
+                fontSize: 15,
+              ),
+            ),
+            
+            // Productos si existen
+            if (_pedido!.productos != null && _pedido!.productos!.isNotEmpty) ...[
+              SizedBox(height: 16),
+              Text(
+                'Productos:',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                ),
+              ),
+              SizedBox(height: 8),
+              Column(
+                children: _pedido!.productos!.map((producto) => 
+                  Padding(
+                    padding: EdgeInsets.symmetric(vertical: 4),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          '${producto.cantidad}x ${producto.nombre}',
+                          style: TextStyle(fontSize: 14),
+                        ),
+                        Text(
+                          '\$${(producto.precio * producto.cantidad).toStringAsFixed(0)}',
+                          style: TextStyle(fontSize: 14),
+                        ),
+                      ],
+                    ),
+                  )
+                ).toList(),
+              ),
+              Divider(),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text(
+                    'Total:',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                  Text(
+                    '\$${_pedido!.total?.toStringAsFixed(0) ?? "0"}',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 16,
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+  
+  // Tarjeta de mapa
+  Widget _buildMapCard() {
+    return Card(
+      margin: EdgeInsets.all(16),
+      elevation: 2,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding: EdgeInsets.all(16),
+            child: Row(
+              children: [
+                Icon(Icons.location_on, color: AppTheme.primaryColor),
+                SizedBox(width: 8),
+                Text(
+                  'Seguimiento en tiempo real',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(
+            height: 300,
+            child: ClipRRect(
+              borderRadius: BorderRadius.only(
+                bottomLeft: Radius.circular(12),
+                bottomRight: Radius.circular(12),
+              ),
+              child: GoogleMap(
+                onMapCreated: _onMapCreated,
+                initialCameraPosition: CameraPosition(
+                  target: _repartidorPosition ?? _clientePosition ?? LatLng(-33.4489, -70.6693),
+                  zoom: 15,
+                ),
+                markers: _markers,
+                polylines: _polylines,
+                myLocationEnabled: _isRepartidorAsignado(),
+                myLocationButtonEnabled: _isRepartidorAsignado(),
+                compassEnabled: true,
+                mapToolbarEnabled: false,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  // Tarjeta de cliente
+  Widget _buildClienteCard() {
+    return Card(
+      margin: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      elevation: 2,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.person, color: AppTheme.primaryColor),
+                SizedBox(width: 8),
+                Text(
+                  'Información del Cliente',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 16),
+            
+            if (_cliente != null) ...[
+              _buildInfoRow(
+                icon: Icons.person_outline,
+                label: 'Nombre',
+                value: _cliente!.name ?? 'No especificado',
+              ),
+              SizedBox(height: 8),
+              _buildInfoRow(
+                icon: Icons.phone_android,
+                label: 'Teléfono',
+                value: _cliente!.telefono ?? 'No especificado',
+              ),
+              SizedBox(height: 8),
+              _buildInfoRow(
+                icon: Icons.location_on_outlined,
+                label: 'Dirección',
+                value: _cliente!.direccion ?? 'No especificada',
+              ),
+            ] else
+              Text(
+                'No se encontró información del cliente',
+                style: TextStyle(
+                  color: Colors.grey,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+  
+  // Tarjeta de repartidor
+  Widget _buildRepartidorCard() {
+    return Card(
+      margin: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      elevation: 2,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.delivery_dining, color: AppTheme.primaryColor),
+                SizedBox(width: 8),
+                Text(
+                  'Información del Repartidor',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+              ],
+            ),
+            SizedBox(height: 16),
+            
+            if (_repartidor != null) ...[
+              Row(
+                children: [
+                  _repartidor!.photoUrl != null
+                    ? CircleAvatar(
+                        backgroundImage: NetworkImage(_repartidor!.photoUrl!),
+                        radius: 24,
+                      )
+                    : CircleAvatar(
+                        child: Icon(Icons.person),
+                        radius: 24,
+                      ),
+                  SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _repartidor!.name ?? 'Repartidor',
+                          style: TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 16,
+                          ),
+                        ),
+                        SizedBox(height: 4),
+                        Text(
+                          _repartidor!.telefono ?? 'No disponible',
+                          style: TextStyle(
+                            color: Colors.grey[600],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (_isCliente() && _repartidor!.telefono != null)
+                    IconButton(
+                      icon: Icon(Icons.phone, color: Colors.green),
+                      onPressed: () {
+                        // Aquí se podría implementar la acción de llamada
+                      },
+                    ),
+                ],
+              ),
+            ] else
+              Text(
+                'No se encontró información del repartidor',
+                style: TextStyle(
+                  color: Colors.grey,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+  
+  // Timeline de seguimiento
+  Widget _buildTimelineCard() {
+    return Card(
+      margin: EdgeInsets.all(16),
+      elevation: 2,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Estado del Pedido',
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+              ),
+            ),
+            SizedBox(height: 16),
+            
+            // Pedido creado
+            _buildTimelineItem(
+              icon: Icons.receipt,
+              title: 'Pedido creado',
+              subtitle: DateFormat('dd/MM HH:mm').format(_pedido!.creadoEn),
+              isActive: true,
+              isLast: false,
+            ),
+            
+            // Pedido aceptado
+            _buildTimelineItem(
+              icon: Icons.pedal_bike,
+              title: 'Pedido en camino',
+              subtitle: _pedido!.estado == 'pendiente'
+                ? 'Esperando repartidor'
+                : 'Repartidor asignado',
+              isActive: _pedido!.estado == 'en camino' || _pedido!.estado == 'entregado',
+              isLast: false,
+            ),
+            
+            // Pedido entregado o cancelado
+            if (_pedido!.estado == 'cancelado')
+              _buildTimelineItem(
+                icon: Icons.cancel,
+                title: 'Pedido cancelado',
+                subtitle: 'El pedido ha sido cancelado',
+                isActive: true,
+                isLast: true,
+                color: Colors.red,
+              )
+            else
+              _buildTimelineItem(
+                icon: Icons.check_circle,
+                title: 'Pedido entregado',
+                subtitle: _pedido!.estado == 'entregado'
+                  ? 'Entrega completada'
+                  : 'Pendiente de entrega',
+                isActive: _pedido!.estado == 'entregado',
+                isLast: true,
+                color: Colors.green,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+  
+  // Botones de acción
+  Widget _buildActionButtons() {
+    // Si no hay usuario actual, no mostrar botones
+    if (_currentUser == null || _pedido == null) return SizedBox();
+    
+    // Verificar rol y estado para mostrar botones apropiados
+    if (_currentUser!.role == 'repartidor') {
+      // Acciones para repartidores
+      if (_pedido!.estado == 'pendiente' && !_isRepartidorAsignado()) {
+        return Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: CustomButton(
+            text: 'Aceptar Pedido',
+            onPressed: _isActionLoading ? null : _aceptarPedido,
+            color: Colors.green,
+            icono: Icons.check,
+            isLoading: _isActionLoading,
+          ),
+        );
+      } else if (_pedido!.estado == 'en camino' && _isRepartidorAsignado()) {
+        return Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: CustomButton(
+            text: 'Marcar como Entregado',
+            onPressed: _isActionLoading ? null : _marcarComoEntregado,
+            color: AppTheme.primaryColor,
+            icono: Icons.check_circle,
+            isLoading: _isActionLoading,
+          ),
+        );
+      }
+    } else if (_currentUser!.role == 'cliente' && _isCliente()) {
+      // Acciones para clientes
+      if (_pedido!.estado == 'pendiente') {
+        return Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: CustomButton(
+            text: 'Cancelar Pedido',
+            onPressed: _isActionLoading ? null : _cancelarPedido,
+            color: Colors.red,
+            icono: Icons.cancel,
+            isLoading: _isActionLoading,
+          ),
+        );
+      }
+    } else if (_currentUser!.role == 'admin') {
+      // Acciones para administradores
+      if (_pedido!.estado == 'pendiente') {
+        return Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          child: CustomButton(
+            text: 'Cancelar Pedido',
+            onPressed: _isActionLoading ? null : _cancelarPedido,
+            color: Colors.red,
+            icono: Icons.cancel,
+            isLoading: _isActionLoading,
+          ),
+        );
+      }
+    }
+    
+    // No hay acciones disponibles
+    return SizedBox();
+  }
+  
+  // Fila de información genérica
   Widget _buildInfoRow({
-    required IconData icono,
-    required String titulo,
-    required String valor,
+    required IconData icon,
+    required String label,
+    required String value,
   }) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Icon(
-          icono,
+          icon,
           size: 18,
           color: AppTheme.primaryColor,
         ),
@@ -832,14 +988,14 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                titulo,
+                label,
                 style: TextStyle(
                   color: Colors.grey[600],
                   fontSize: 12,
                 ),
               ),
               Text(
-                valor,
+                value,
                 style: TextStyle(
                   fontSize: 15,
                 ),
@@ -851,14 +1007,14 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
     );
   }
   
-  // Widget para timeline
+  // Elemento de timeline
   Widget _buildTimelineItem({
-    required String titulo,
-    required String fecha,
-    required IconData icono,
-    required Color color,
-    required bool isCompleted,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required bool isActive,
     required bool isLast,
+    Color color = Colors.blue,
   }) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -869,11 +1025,11 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
               width: 30,
               height: 30,
               decoration: BoxDecoration(
-                color: isCompleted ? color : Colors.grey[300],
+                color: isActive ? color : Colors.grey[300],
                 shape: BoxShape.circle,
               ),
               child: Icon(
-                icono,
+                icon,
                 color: Colors.white,
                 size: 18,
               ),
@@ -882,7 +1038,7 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
               Container(
                 width: 2,
                 height: 40,
-                color: isCompleted ? color : Colors.grey[300],
+                color: isActive ? color : Colors.grey[300],
               ),
           ],
         ),
@@ -892,15 +1048,15 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                titulo,
+                title,
                 style: TextStyle(
                   fontWeight: FontWeight.bold,
-                  color: isCompleted ? color : Colors.grey,
+                  color: isActive ? color : Colors.grey[600],
                 ),
               ),
               SizedBox(height: 4),
               Text(
-                fecha,
+                subtitle,
                 style: TextStyle(
                   color: Colors.grey[600],
                   fontSize: 13,
@@ -911,85 +1067,6 @@ class _PedidoDetailScreenState extends State<PedidoDetailScreen> {
           ),
         ),
       ],
-    );
-  }
-  
-  // Costruir botones de acción según el rol y estado
-  Widget _buildActionButtons(PedidoModel pedido) {
-    // Si no hay usuario actual, no mostrar botones
-    if (_currentUser == null) return SizedBox();
-    
-    // Determinar qué botones mostrar según el rol y estado
-    if (_currentUser!.role == 'repartidor') {
-      // Acciones para repartidores
-      if (pedido.estado == 'pendiente' && (pedido.repartidorId == null || pedido.repartidorId!.isEmpty)) {
-        return CustomButton(
-          text: 'Aceptar Pedido',
-          onPressed: () => _aceptarPedido(pedido),
-          color: Colors.green,
-          icono: Icons.check,
-        );
-      } else if (pedido.estado == 'en camino' && pedido.repartidorId == _currentUser!.uid) {
-        return Column(
-          children: [
-            CustomButton(
-              text: 'Ver Mapa',
-              onPressed: () => _navegarAMapa(pedido),
-              color: AppTheme.primaryColor,
-              icono: Icons.map,
-            ),
-            SizedBox(height: 8),
-            CustomButton(
-              text: 'Marcar como Entregado',
-              onPressed: () => _marcarComoEntregado(pedido.id),
-              color: Colors.green,
-              icono: Icons.check_circle,
-            ),
-          ],
-        );
-      }
-    } else if (_currentUser!.role == 'cliente' && pedido.userId == _currentUser!.uid) {
-      // Acciones para clientes
-      if (pedido.estado == 'pendiente') {
-        return CustomButton(
-          text: 'Cancelar Pedido',
-          onPressed: () => _cancelarPedido(pedido.id),
-          color: Colors.red,
-          icono: Icons.cancel,
-        );
-      } else if (pedido.estado == 'en camino') {
-        return CustomButton(
-          text: 'Seguir Pedido',
-          onPressed: () => _navegarAMapa(pedido),
-          color: AppTheme.primaryColor,
-          icono: Icons.map,
-        );
-      }
-    } else if (_currentUser!.role == 'admin') {
-      // Acciones para administradores
-      if (pedido.estado == 'pendiente') {
-        return CustomButton(
-          text: 'Cancelar Pedido',
-          onPressed: () => _cancelarPedido(pedido.id),
-          color: Colors.red,
-          icono: Icons.cancel,
-        );
-      } else if (pedido.estado == 'en camino') {
-        return CustomButton(
-          text: 'Seguir Pedido',
-          onPressed: () => _navegarAMapa(pedido),
-          color: AppTheme.primaryColor,
-          icono: Icons.map,
-        );
-      }
-    }
-    
-    // Si no hay acciones disponibles, mostrar botón para volver
-    return CustomButton(
-      text: 'Volver',
-      onPressed: () => Navigator.pop(context),
-      color: Colors.grey,
-      icono: Icons.arrow_back,
     );
   }
 }
